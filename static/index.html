@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Котировки в реальном времени</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --text:#1b1f24; --muted:#6b7480; --up:#0a8f5b; --down:#d23a3a; --line:#e2e5ea; --accent:#1f4fd8; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171b; --card:#1d2127; --text:#e8ebef; --muted:#8b95a1; --up:#35c98a; --down:#ff6b6b; --line:#2d333b; --accent:#6c97ff; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.45 system-ui, sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:24px 16px 48px; }
+  header { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  h1 { font-size:1.4rem; margin:0; }
+  #status { font-size:.9rem; color:var(--muted); }
+  #status::before { content:""; display:inline-block; width:.6em; height:.6em; border-radius:50%; background:var(--down); margin-right:.4em; }
+  #status.on::before { background:var(--up); }
+  #picker { display:flex; flex-wrap:wrap; gap:8px; margin:20px 0; }
+  label.chip { border:1px solid var(--line); background:var(--card); border-radius:999px; padding:6px 14px; cursor:pointer; user-select:none; }
+  label.chip:has(input:checked) { border-color:var(--accent); color:var(--accent); font-weight:600; }
+  label.chip:has(input:focus-visible) { outline:2px solid var(--accent); outline-offset:2px; }
+  label.chip input { position:absolute; opacity:0; pointer-events:none; }
+  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  th, td { padding:10px 14px; text-align:right; border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums; }
+  th:first-child, td:first-child { text-align:left; }
+  th { font-weight:500; color:var(--muted); font-size:.85rem; }
+  tr:last-child td { border-bottom:0; }
+  .up { color:var(--up); } .down { color:var(--down); }
+  .flash-up { background:color-mix(in srgb, var(--up) 18%, transparent); }
+  .flash-down { background:color-mix(in srgb, var(--down) 18%, transparent); }
+  td { transition:background .6s; }
+  #empty { color:var(--muted); text-align:center; padding:24px; }
+  #log { margin-top:20px; font-size:.85rem; color:var(--muted); min-height:1.4em; }
+  @media (prefers-reduced-motion: reduce) { td { transition:none; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Котировки в реальном времени</h1>
+    <span id="status">нет соединения</span>
+  </header>
+
+  <div id="picker" role="group" aria-label="Выбор тикеров"></div>
+
+  <table>
+    <thead><tr><th>Тикер</th><th>Цена, ₽</th><th>Изм., %</th><th>Время</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <p id="empty">Отметьте тикеры выше, чтобы начать получать цены.</p>
+  <div id="log" aria-live="polite"></div>
+</main>
+
+<script>
+const statusEl = document.getElementById("status");
+const picker = document.getElementById("picker");
+const rows = document.getElementById("rows");
+const empty = document.getElementById("empty");
+const logEl = document.getElementById("log");
+let ws, retry = 0;
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws/quotes`);
+
+  ws.onopen = () => {
+    retry = 0;
+    statusEl.textContent = "подключено"; statusEl.className = "on";
+    ws.send(JSON.stringify({action: "list"}));
+    const chosen = [...picker.querySelectorAll("input:checked")].map(i => i.value);
+    if (chosen.length) ws.send(JSON.stringify({action: "subscribe", symbols: chosen}));  // восстановление после обрыва
+  };
+
+  ws.onclose = () => {
+    statusEl.textContent = "переподключение…"; statusEl.className = "";
+    setTimeout(connect, Math.min(1000 * 2 ** retry++, 10000));
+  };
+
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === "symbols" && !picker.children.length) buildPicker(m.symbols);
+    else if (m.type === "quote") renderQuote(m);
+    else if (m.type === "error") logEl.textContent = "Ошибка: " + m.message;
+  };
+}
+
+function buildPicker(symbols) {
+  for (const s of symbols) {
+    const label = document.createElement("label");
+    label.className = "chip";
+    label.innerHTML = `<input type="checkbox" value="${s}">${s}`;
+    label.querySelector("input").onchange = (ev) => {
+      ws.send(JSON.stringify({action: ev.target.checked ? "subscribe" : "unsubscribe", symbols: [s]}));
+      if (!ev.target.checked) document.getElementById("row-" + s)?.remove();
+      empty.hidden = rows.children.length > 0 || picker.querySelector("input:checked") !== null;
+    };
+    picker.appendChild(label);
+  }
+}
+
+function renderQuote(q) {
+  empty.hidden = true;
+  let tr = document.getElementById("row-" + q.symbol);
+  if (!tr) {
+    tr = document.createElement("tr");
+    tr.id = "row-" + q.symbol;
+    tr.innerHTML = "<td></td><td></td><td></td><td></td>";
+    rows.appendChild(tr);
+  }
+  const [sym, price, chg, time] = tr.children;
+  sym.textContent = q.symbol;
+  price.textContent = q.price.toLocaleString("ru-RU", {minimumFractionDigits: 2});
+  chg.textContent = (q.change_pct >= 0 ? "+" : "") + q.change_pct.toFixed(3);
+  chg.className = q.change_pct >= 0 ? "up" : "down";
+  time.textContent = new Date(q.ts * 1000).toLocaleTimeString("ru-RU");
+  price.classList.add(q.change_pct >= 0 ? "flash-up" : "flash-down");
+  setTimeout(() => price.classList.remove("flash-up", "flash-down"), 600);
+}
+
+connect();
+</script>
+</body>
+</html>
